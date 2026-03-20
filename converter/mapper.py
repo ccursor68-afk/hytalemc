@@ -6,6 +6,16 @@ from pathlib import Path
 BLOCK_MAP_PATH = Path(__file__).resolve().parent.parent / "data" / "block_map.json"
 FALLBACK_BLOCK = "Rock_Stone_Brick"
 
+# Şüpheli/test blokları güvenli alternatiflerle değiştir
+# Bu bloklar bazı Hytale versiyonlarında çökmeye neden olabilir
+SAFE_REPLACEMENTS = {
+    "Prototype_Rock_Concrete_Brick": "Rock_Stone_Brick",
+    "Prototype_Rock_Concrete_Smooth": "Rock_Stone_Brick_Smooth",
+    "Rock_Crystal_White_Block": "Rock_Stone_Brick_Smooth",
+    # Bitki blokları da sorun çıkarabilir
+    "Plant_Fern_Forest": "Plant_Grass_Sharp",
+}
+
 
 class BlockMapper:
     """Minecraft blok adlarini Hytale isimlerine cevirir."""
@@ -71,6 +81,13 @@ class BlockMapper:
         if hytale_name == "":
             # Bos mapping degeri "yazma/atla" demektir (air, torch vb.).
             return None
+
+        # Şüpheli blokları güvenli alternatiflerle değiştir
+        if hytale_name in SAFE_REPLACEMENTS:
+            safe_name = SAFE_REPLACEMENTS[hytale_name]
+            if self._debug_count < 5:
+                print(f"[MAPPER] Güvenli değişim: '{hytale_name}' -> '{safe_name}'")
+            hytale_name = safe_name
 
         return {"x": x, "y": y, "z": z, "name": hytale_name}
 
