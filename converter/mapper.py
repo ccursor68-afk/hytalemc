@@ -1,9 +1,19 @@
 """Minecraft bloklarini Hytale prefab bloklarina esler."""
 
 import json
+import sys
+import os
 from pathlib import Path
 
-BLOCK_MAP_PATH = Path(__file__).resolve().parent.parent / "data" / "block_map.json"
+
+def _get_resource_path(relative: str) -> Path:
+    """PyInstaller icin kaynak dosya yolu"""
+    if hasattr(sys, '_MEIPASS'):
+        return Path(sys._MEIPASS) / relative
+    return Path(__file__).resolve().parent.parent / relative
+
+
+BLOCK_MAP_PATH = _get_resource_path("data/block_map.json")
 FALLBACK_BLOCK = "Rock_Stone_Brick"
 
 # Minecraft yön -> Hytale rotation eşleştirmesi

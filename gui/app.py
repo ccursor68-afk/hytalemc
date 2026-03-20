@@ -1,418 +1,846 @@
-"""CustomTkinter tabanli ana uygulama penceresi."""
-
-from __future__ import annotations
-
-import queue
-import threading
-from dataclasses import dataclass
-from datetime import datetime
-from pathlib import Path
-from tkinter import filedialog, messagebox
+"""
+Hytale Converter - Modern Dark UI
+CustomTkinter + ttk ile profesyonel arayuz
+"""
 
 import customtkinter as ctk
+from tkinter import filedialog, messagebox
+import tkinter as tk
+from tkinter import ttk
+from pathlib import Path
+from datetime import datetime
+import threading
+import queue
+import sys
+import os
 
-from converter.mapper import BlockMapper
+# Converter modulleri
 from converter.reader import read_schematic
+from converter.mapper import BlockMapper
 from converter.writer import write_prefab
-from gui.components import QueueItemWidget
-
-SUPPORTED_EXTENSIONS = {".schematic", ".schem", ".litematic"}
 
 
-@dataclass(slots=True)
-class QueueItem:
-    """Donusturme kuyrugundaki dosya kaydini tutar."""
-
-    path: Path
-    status: str = "waiting"
-    error: str = ""
+def resource_path(relative_path: str) -> str:
+    """PyInstaller icin kaynak dosya yolu"""
+    if hasattr(sys, '_MEIPASS'):
+        return os.path.join(sys._MEIPASS, relative_path)
+    return os.path.join(os.path.abspath("."), relative_path)
 
 
-class HytaleConverterApp:
-    """Minecraft -> Hytale toplu donusum GUI uygulamasi."""
+# =============================================================================
+# RENK PALETI
+# =============================================================================
+COLORS = {
+    "bg_darkest":   "#080c12",
+    "bg_dark":      "#0a0e14",
+    "bg_main":      "#0d1117",
+    "bg_panel":     "#0d2040",
+    "border":       "#1e3a5f",
+    "border_hover": "#2a5a90",
+    "accent":       "#0066cc",
+    "accent_light": "#66aaff",
+    "text_primary": "#a0c0e0",
+    "text_muted":   "#4a6a8a",
+    "text_mono":    "#7aa8d4",
+    "success":      "#00cc88",
+    "warning":      "#aaaa00",
+    "error":        "#ff4444",
+    "btn_convert":  "#002a60",
+    "btn_convert_hover": "#003a80",
+    "btn_convert_border": "#0055cc",
+}
 
-    def __init__(self) -> None:
-        """Ana pencereyi, durum degiskenlerini ve servisleri hazirlar."""
+# Font ayarlari
+FONT_MONO = ("Consolas", 10)
+FONT_MONO_SMALL = ("Consolas", 9)
+FONT_HEADER = ("Segoe UI", 11, "bold")
+FONT_LABEL = ("Segoe UI", 10)
+FONT_BUTTON = ("Segoe UI", 9, "bold")
+FONT_TITLE = ("Segoe UI", 14, "bold")
+
+VERSION = "2.0.0"
+
+
+# =============================================================================
+# DOSYA DURUMU
+# =============================================================================
+class FileStatus:
+    PENDING = "BEKLE"
+    PROCESSING = "ISLEM"
+    SUCCESS = "TAMAM"
+    ERROR = "HATA"
+
+
+# =============================================================================
+# ANA UYGULAMA
+# =============================================================================
+class HytaleConverterApp(ctk.CTk):
+    def __init__(self):
+        super().__init__()
+        
+        # Pencere ayarlari
+        self.title("HYTALE CONVERTER")
+        self.geometry("920x580")
+        self.minsize(800, 500)
+        
+        # Tema
         ctk.set_appearance_mode("dark")
-        ctk.set_default_color_theme("blue")
-
-        self.root = ctk.CTk()
-        self.root.title("Minecraft -> Hytale Schematic Converter")
-        self.root.geometry("1200x760")
-        self.root.minsize(1080, 680)
-
-        self.mapper = BlockMapper()
-
-        self.queue_items: list[QueueItem] = []
-        self.item_widgets: dict[Path, QueueItemWidget] = {}
-        self.selected_path: Path | None = None
-        self.last_report: str = ""
-
-        self.same_folder_var = ctk.BooleanVar(value=False)
-        self.strict_mode_var = ctk.BooleanVar(value=False)
-        self.output_dir_var = ctk.StringVar(value=str(Path.cwd() / "output"))
-
-        self._event_queue: queue.Queue[tuple] = queue.Queue()
-        self._worker_thread: threading.Thread | None = None
-        self._build_layout()
-        self._poll_events()
-
-    def _build_layout(self) -> None:
-        """Sol kuyruk paneli ve sag kontrol paneli arayuzunu kurar."""
-        container = ctk.CTkFrame(self.root)
-        container.pack(fill="both", expand=True, padx=12, pady=12)
-        container.grid_columnconfigure(0, weight=1)
-        container.grid_columnconfigure(1, weight=1)
-        container.grid_rowconfigure(0, weight=1)
-
-        left_panel = ctk.CTkFrame(container)
-        left_panel.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
-        left_panel.grid_columnconfigure(0, weight=1)
-        left_panel.grid_rowconfigure(1, weight=1)
-
-        left_top = ctk.CTkFrame(left_panel, fg_color="transparent")
-        left_top.grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 8))
-        left_top.grid_columnconfigure((0, 1), weight=1)
-
-        ctk.CTkButton(left_top, text="Dosya Ekle", command=self.add_files).grid(
-            row=0, column=0, sticky="ew", padx=(0, 6)
-        )
-        ctk.CTkButton(left_top, text="Klasor Ekle", command=self.add_folder).grid(
-            row=0, column=1, sticky="ew", padx=(6, 0)
-        )
-
-        self.queue_frame = ctk.CTkScrollableFrame(left_panel, label_text="Donusum Kuyrugu")
-        self.queue_frame.grid(row=1, column=0, sticky="nsew", padx=12, pady=8)
-        self.queue_frame.grid_columnconfigure(0, weight=1)
-
-        left_bottom = ctk.CTkFrame(left_panel, fg_color="transparent")
-        left_bottom.grid(row=2, column=0, sticky="ew", padx=12, pady=(8, 12))
-        left_bottom.grid_columnconfigure((0, 1), weight=1)
-        ctk.CTkButton(left_bottom, text="Secileni Kaldir", command=self.remove_selected).grid(
-            row=0, column=0, sticky="ew", padx=(0, 6)
-        )
-        ctk.CTkButton(left_bottom, text="Tumunu Temizle", command=self.clear_all).grid(
-            row=0, column=1, sticky="ew", padx=(6, 0)
-        )
-
-        right_panel = ctk.CTkFrame(container)
-        right_panel.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
-        right_panel.grid_columnconfigure(0, weight=1)
-        right_panel.grid_rowconfigure(4, weight=1)
-
-        self._build_settings(right_panel)
-
-        self.convert_button = ctk.CTkButton(
-            right_panel,
-            text="DONUSTUR",
-            fg_color="#2E8B57",
-            hover_color="#247048",
-            height=56,
-            font=ctk.CTkFont(size=20, weight="bold"),
-            command=self.start_conversion,
-        )
-        self.convert_button.grid(row=1, column=0, sticky="ew", padx=12, pady=(4, 8))
-
-        self.overall_progress = ctk.CTkProgressBar(right_panel)
-        self.overall_progress.grid(row=2, column=0, sticky="ew", padx=12, pady=(0, 10))
-        self.overall_progress.set(0)
-
-        self.summary_label = ctk.CTkLabel(right_panel, text="Hazir")
-        self.summary_label.grid(row=3, column=0, sticky="w", padx=12, pady=(0, 8))
-
-        self.log_box = ctk.CTkTextbox(right_panel, wrap="word")
-        self.log_box.grid(row=4, column=0, sticky="nsew", padx=12, pady=(0, 10))
-        self.log_box.configure(state="disabled")
-
-        ctk.CTkButton(right_panel, text="Raporu Kaydet", command=self.save_report).grid(
-            row=5, column=0, sticky="ew", padx=12, pady=(0, 12)
-        )
-
-    def _build_settings(self, parent) -> None:
-        """Sag paneldeki ayarlar bolumunu olusturur."""
-        settings = ctk.CTkFrame(parent)
-        settings.grid(row=0, column=0, sticky="ew", padx=12, pady=12)
-        settings.grid_columnconfigure(0, weight=1)
-
-        ctk.CTkLabel(settings, text="Ayarlar", font=ctk.CTkFont(weight="bold")).grid(
-            row=0, column=0, sticky="w", padx=8, pady=(8, 6)
-        )
-
-        output_row = ctk.CTkFrame(settings, fg_color="transparent")
-        output_row.grid(row=1, column=0, sticky="ew", padx=8, pady=4)
-        output_row.grid_columnconfigure(0, weight=1)
-        self.output_entry = ctk.CTkEntry(output_row, textvariable=self.output_dir_var)
-        self.output_entry.grid(row=0, column=0, sticky="ew", padx=(0, 6))
-        ctk.CTkButton(output_row, text="Sec", width=70, command=self.pick_output_folder).grid(
-            row=0, column=1, sticky="e"
-        )
-
-        ctk.CTkCheckBox(
-            settings,
-            text="Ciktiyi kaynak dosyayla ayni klasore koy",
-            variable=self.same_folder_var,
-        ).grid(row=2, column=0, sticky="w", padx=8, pady=4)
-
-        ctk.CTkCheckBox(
-            settings,
-            text="Eslesmeyen bloklarda hata ver (strict)",
-            variable=self.strict_mode_var,
-        ).grid(row=3, column=0, sticky="w", padx=8, pady=(4, 8))
-
-    def run(self) -> None:
-        """Tkinter event dongusunu baslatir."""
-        self.root.mainloop()
-
-    def add_files(self) -> None:
-        """Kullanicidan birden cok dosya secip kuyruga ekler."""
-        filetypes = [("Schematic Files", "*.schem *.schematic *.litematic")]
-        selected = filedialog.askopenfilenames(title="Dosya Sec", filetypes=filetypes)
-        for p in selected:
-            self._try_add_path(Path(p))
-
-    def add_folder(self) -> None:
-        """Secilen klasor altindaki uygun dosyalari kuyruga ekler."""
-        folder = filedialog.askdirectory(title="Klasor Sec")
-        if not folder:
-            return
-        base = Path(folder)
-        found = 0
-        for ext in SUPPORTED_EXTENSIONS:
-            for file_path in base.rglob(f"*{ext}"):
-                self._try_add_path(file_path)
-                found += 1
-        self._log(f"Klasorden toplam {found} dosya tarandi.")
-
-    def _try_add_path(self, file_path: Path) -> None:
-        """Desteklenen ve tekrar etmeyen dosyalari kuyruga ekler."""
-        if file_path.suffix.lower() not in SUPPORTED_EXTENSIONS:
-            self._log(f"Desteklenmeyen format atlandi: {file_path.name}")
-            return
-        if any(item.path == file_path for item in self.queue_items):
-            return
-
-        item = QueueItem(path=file_path)
-        self.queue_items.append(item)
-        self._create_item_widget(item)
-        self._log(f"Kuyruga eklendi: {file_path.name}")
-
-    def _create_item_widget(self, item: QueueItem) -> None:
-        """Queue item icin satir widget olusturup listeye yerlestirir."""
-        widget = QueueItemWidget(
-            self.queue_frame,
-            file_name=item.path.name,
-            on_select=lambda w: self._select_widget(item.path, w),
-        )
-        widget.grid(row=len(self.item_widgets), column=0, sticky="ew", padx=4, pady=4)
-        self.item_widgets[item.path] = widget
-
-    def _select_widget(self, path: Path, selected_widget: QueueItemWidget) -> None:
-        """Kullanici secimini takip eder ve satir vurgusunu gunceller."""
-        self.selected_path = path
-        for p, widget in self.item_widgets.items():
-            widget.set_selected(widget is selected_widget and p == path)
-
-    def remove_selected(self) -> None:
-        """Secilen dosyayi kuyruktan kaldirir."""
-        if not self.selected_path:
-            return
-        self.queue_items = [item for item in self.queue_items if item.path != self.selected_path]
-        self.selected_path = None
-        self._rebuild_queue_ui()
-        self._log("Secili dosya kuyruktan kaldirildi.")
-
-    def clear_all(self) -> None:
-        """Tum dosya kuyrugunu sifirlar."""
-        self.queue_items.clear()
-        self.selected_path = None
-        self._rebuild_queue_ui()
-        self.overall_progress.set(0)
-        self.summary_label.configure(text="Hazir")
-        self._log("Tum kuyruk temizlendi.")
-
-    def _rebuild_queue_ui(self) -> None:
-        """Queue satirlarini temizleyip mevcut item'lara gore yeniden cizer."""
-        for widget in self.item_widgets.values():
-            widget.destroy()
-        self.item_widgets.clear()
-        for item in self.queue_items:
-            self._create_item_widget(item)
-
-    def pick_output_folder(self) -> None:
-        """Cikti klasoru secimini dosya secici ile yapar."""
-        folder = filedialog.askdirectory(title="Cikti Klasoru Sec")
-        if folder:
-            self.output_dir_var.set(folder)
-            self._log(f"Cikti klasoru secildi: {folder}")
-
-    def start_conversion(self) -> None:
-        """Thread uzerinde donusum surecini baslatir."""
-        if self._worker_thread and self._worker_thread.is_alive():
-            messagebox.showinfo("Bilgi", "Donusum zaten devam ediyor.")
-            return
-        if not self.queue_items:
-            messagebox.showwarning("Uyari", "Lutfen once dosya ekleyin.")
-            return
-
-        # Yazma izni kontrolu: kaynak klasore yaz secili degilse output klasor test edilir.
-        if not self.same_folder_var.get():
-            output_dir = Path(self.output_dir_var.get().strip())
-            if not self._check_output_writable(output_dir):
-                msg = "Cikti klasoru yazilabilir degil."
-                self._log(msg)
-                messagebox.showerror("Hata", msg)
-                return
-
-        self.convert_button.configure(state="disabled")
-        self.overall_progress.set(0)
-        self.summary_label.configure(text="Donusum basladi...")
-
-        for item in self.queue_items:
-            item.status = "waiting"
-            item.error = ""
-            if item.path in self.item_widgets:
-                self.item_widgets[item.path].set_status("⏳")
-                self.item_widgets[item.path].set_progress(0)
-
-        self._worker_thread = threading.Thread(target=self._convert_worker, daemon=True)
-        self._worker_thread.start()
-
-    def _check_output_writable(self, folder: Path) -> bool:
-        """Cikti klasorune yazma izni olup olmadigini test eder."""
+        self.configure(fg_color=COLORS["bg_main"])
+        
+        # Ikon
         try:
-            folder.mkdir(parents=True, exist_ok=True)
-            probe = folder / ".write_test.tmp"
-            probe.write_text("ok", encoding="utf-8")
-            probe.unlink(missing_ok=True)
-            return True
+            icon_path = resource_path("assets/icon.ico")
+            if os.path.exists(icon_path):
+                self.iconbitmap(icon_path)
         except Exception:
-            return False
-
-    def _convert_worker(self) -> None:
-        """Arka planda dosyalari sirayla donusturup event queue'ya durum yazar."""
-        total = len(self.queue_items)
-        success = 0
-        failed = 0
-        errors: list[str] = []
-
-        for index, item in enumerate(self.queue_items, start=1):
-            self._event_queue.put(("file_start", item.path))
-            try:
-                blocks = read_schematic(item.path)
-                self._event_queue.put(("file_progress", item.path, 0.4))
-                mapped_blocks = self.mapper.map_blocks(blocks)
-                self._event_queue.put(("file_progress", item.path, 0.8))
-
-                if self.same_folder_var.get():
-                    output_dir = item.path.parent
-                else:
-                    output_dir = Path(self.output_dir_var.get().strip())
-                output_file = output_dir / f"{item.path.stem}.prefab.json"
-
-                write_prefab(blocks=mapped_blocks, output_path=output_file)
-                success += 1
-                self._event_queue.put(("file_done", item.path, True, ""))
-            except (ValueError, PermissionError, OSError) as exc:
-                failed += 1
-                error = str(exc)
-                errors.append(f"{item.path.name}: {error}")
-                self._event_queue.put(("file_done", item.path, False, error))
-            except Exception as exc:
-                failed += 1
-                error = f"Beklenmeyen hata: {exc}"
-                errors.append(f"{item.path.name}: {error}")
-                self._event_queue.put(("file_done", item.path, False, error))
-
-            self._event_queue.put(("overall_progress", index / total))
-
-        report_lines = [
-            "Donusum Raporu",
-            "=" * 40,
-            f"Toplam dosya: {total}",
-            f"Basarili: {success}",
-            f"Hatali: {failed}",
-            "",
-        ]
-        if errors:
-            report_lines.append("Hata Listesi:")
-            report_lines.extend(f"- {line}" for line in errors)
+            pass
+        
+        # Degiskenler
+        self.files_queue = []  # [(path, status, progress), ...]
+        self.output_dir = Path.home() / "Documents" / "HytaleConverter"
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        
+        self.is_converting = False
+        self.log_queue = queue.Queue()
+        
+        # Sayaclar
+        self.success_count = 0
+        self.error_count = 0
+        
+        # UI olustur
+        self._create_ui()
+        
+        # Log queue'u kontrol et
+        self._check_log_queue()
+    
+    def _create_ui(self):
+        """Ana UI'i olustur"""
+        # Ust baslik bari
+        self._create_title_bar()
+        
+        # Ana icerik (sol ve sag panel)
+        self.content_frame = ctk.CTkFrame(self, fg_color="transparent")
+        self.content_frame.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+        self.content_frame.grid_columnconfigure(0, weight=1)
+        self.content_frame.grid_columnconfigure(1, weight=0)  # ayirici
+        self.content_frame.grid_columnconfigure(2, weight=1)
+        self.content_frame.grid_rowconfigure(0, weight=1)
+        
+        # Sol panel - Dosya kuyrugu
+        self._create_left_panel()
+        
+        # Dikey ayirici
+        separator = ctk.CTkFrame(
+            self.content_frame,
+            width=1,
+            fg_color=COLORS["border"]
+        )
+        separator.grid(row=0, column=1, sticky="ns", padx=8)
+        
+        # Sag panel - Kontrol
+        self._create_right_panel()
+    
+    def _create_title_bar(self):
+        """Ust baslik bari"""
+        title_frame = ctk.CTkFrame(
+            self,
+            fg_color=COLORS["bg_dark"],
+            height=50,
+            corner_radius=0
+        )
+        title_frame.pack(fill="x", padx=0, pady=0)
+        title_frame.pack_propagate(False)
+        
+        # Sol taraf - ikon ve baslik
+        left_frame = ctk.CTkFrame(title_frame, fg_color="transparent")
+        left_frame.pack(side="left", padx=16, pady=8)
+        
+        # Altigen ikon (unicode)
+        icon_label = ctk.CTkLabel(
+            left_frame,
+            text="⬡",
+            font=("Segoe UI", 24),
+            text_color=COLORS["accent"]
+        )
+        icon_label.pack(side="left", padx=(0, 8))
+        
+        # Baslik
+        title_label = ctk.CTkLabel(
+            left_frame,
+            text="H Y T A L E   C O N V E R T E R",
+            font=FONT_TITLE,
+            text_color=COLORS["text_primary"]
+        )
+        title_label.pack(side="left")
+        
+        # PRO badge
+        pro_badge = ctk.CTkLabel(
+            left_frame,
+            text=" PRO ",
+            font=("Segoe UI", 8, "bold"),
+            fg_color=COLORS["accent"],
+            text_color="white",
+            corner_radius=4,
+            padx=6,
+            pady=2
+        )
+        pro_badge.pack(side="left", padx=(12, 0))
+        
+        # Sag taraf - versiyon
+        version_label = ctk.CTkLabel(
+            title_frame,
+            text=f"v{VERSION}",
+            font=FONT_MONO_SMALL,
+            text_color=COLORS["text_muted"]
+        )
+        version_label.pack(side="right", padx=16)
+    
+    def _create_left_panel(self):
+        """Sol panel - Dosya kuyrugu"""
+        left_panel = ctk.CTkFrame(
+            self.content_frame,
+            fg_color=COLORS["bg_dark"],
+            border_width=1,
+            border_color=COLORS["border"],
+            corner_radius=6
+        )
+        left_panel.grid(row=0, column=0, sticky="nsew")
+        
+        # Header
+        header = ctk.CTkFrame(left_panel, fg_color="transparent", height=44)
+        header.pack(fill="x", padx=12, pady=(12, 8))
+        header.pack_propagate(False)
+        
+        # Baslik
+        title = ctk.CTkLabel(
+            header,
+            text="DONUSUM KUYRUGU",
+            font=FONT_HEADER,
+            text_color=COLORS["text_primary"]
+        )
+        title.pack(side="left")
+        
+        # Butonlar
+        btn_frame = ctk.CTkFrame(header, fg_color="transparent")
+        btn_frame.pack(side="right")
+        
+        self.add_folder_btn = ctk.CTkButton(
+            btn_frame,
+            text="KLASOR",
+            font=FONT_BUTTON,
+            width=70,
+            height=28,
+            fg_color=COLORS["bg_panel"],
+            hover_color=COLORS["border_hover"],
+            border_width=1,
+            border_color=COLORS["border"],
+            text_color=COLORS["text_primary"],
+            command=self._add_folder
+        )
+        self.add_folder_btn.pack(side="right", padx=(4, 0))
+        
+        self.add_file_btn = ctk.CTkButton(
+            btn_frame,
+            text="+ DOSYA",
+            font=FONT_BUTTON,
+            width=80,
+            height=28,
+            fg_color=COLORS["accent"],
+            hover_color=COLORS["accent_light"],
+            text_color="white",
+            command=self._add_files
+        )
+        self.add_file_btn.pack(side="right")
+        
+        # Dosya listesi
+        self.file_list_frame = ctk.CTkScrollableFrame(
+            left_panel,
+            fg_color=COLORS["bg_darkest"],
+            border_width=1,
+            border_color=COLORS["border"],
+            corner_radius=4
+        )
+        self.file_list_frame.pack(fill="both", expand=True, padx=12, pady=4)
+        
+        # Bos mesaji
+        self.empty_label = ctk.CTkLabel(
+            self.file_list_frame,
+            text="Dosya eklemek icin + DOSYA butonunu kullanin\nveya .schem/.schematic dosyalarini suruklein",
+            font=FONT_LABEL,
+            text_color=COLORS["text_muted"],
+            justify="center"
+        )
+        self.empty_label.pack(expand=True, pady=40)
+        
+        # Alt footer
+        footer = ctk.CTkFrame(left_panel, fg_color="transparent", height=40)
+        footer.pack(fill="x", padx=12, pady=(4, 12))
+        footer.pack_propagate(False)
+        
+        self.remove_btn = ctk.CTkButton(
+            footer,
+            text="SECILENI KALDIR",
+            font=FONT_BUTTON,
+            width=120,
+            height=28,
+            fg_color=COLORS["bg_dark"],
+            hover_color="#2a1a1a",
+            border_width=1,
+            border_color="#5a2a2a",
+            text_color=COLORS["error"],
+            command=self._remove_selected
+        )
+        self.remove_btn.pack(side="left")
+        
+        self.clear_btn = ctk.CTkButton(
+            footer,
+            text="TUMUNU TEMIZLE",
+            font=FONT_BUTTON,
+            width=120,
+            height=28,
+            fg_color=COLORS["bg_dark"],
+            hover_color="#2a1a1a",
+            border_width=1,
+            border_color="#5a2a2a",
+            text_color=COLORS["error"],
+            command=self._clear_all
+        )
+        self.clear_btn.pack(side="left", padx=(8, 0))
+    
+    def _create_right_panel(self):
+        """Sag panel - Kontrol"""
+        right_panel = ctk.CTkFrame(
+            self.content_frame,
+            fg_color=COLORS["bg_dark"],
+            border_width=1,
+            border_color=COLORS["border"],
+            corner_radius=6
+        )
+        right_panel.grid(row=0, column=2, sticky="nsew")
+        
+        # Ayarlar bolumu
+        settings_frame = ctk.CTkFrame(right_panel, fg_color="transparent")
+        settings_frame.pack(fill="x", padx=12, pady=12)
+        
+        # Cikti dizini
+        output_frame = ctk.CTkFrame(settings_frame, fg_color="transparent")
+        output_frame.pack(fill="x", pady=(0, 8))
+        
+        ctk.CTkLabel(
+            output_frame,
+            text="CIKTI",
+            font=FONT_BUTTON,
+            text_color=COLORS["text_muted"],
+            width=50
+        ).pack(side="left")
+        
+        self.output_entry = ctk.CTkEntry(
+            output_frame,
+            font=FONT_MONO_SMALL,
+            fg_color=COLORS["bg_darkest"],
+            border_color=COLORS["border"],
+            text_color=COLORS["text_mono"],
+            height=28
+        )
+        self.output_entry.pack(side="left", fill="x", expand=True, padx=(8, 8))
+        self.output_entry.insert(0, str(self.output_dir))
+        
+        self.output_btn = ctk.CTkButton(
+            output_frame,
+            text="SEC",
+            font=FONT_BUTTON,
+            width=50,
+            height=28,
+            fg_color=COLORS["bg_panel"],
+            hover_color=COLORS["border_hover"],
+            border_width=1,
+            border_color=COLORS["border"],
+            text_color=COLORS["text_primary"],
+            command=self._select_output_dir
+        )
+        self.output_btn.pack(side="right")
+        
+        # Toggle secenekleri
+        toggle_frame = ctk.CTkFrame(settings_frame, fg_color="transparent")
+        toggle_frame.pack(fill="x", pady=(8, 0))
+        
+        self.overwrite_var = ctk.BooleanVar(value=True)
+        self.overwrite_check = ctk.CTkCheckBox(
+            toggle_frame,
+            text="Mevcut dosyalarin ustune yaz",
+            font=FONT_LABEL,
+            variable=self.overwrite_var,
+            fg_color=COLORS["accent"],
+            hover_color=COLORS["accent_light"],
+            border_color=COLORS["border"],
+            text_color=COLORS["text_primary"],
+            checkmark_color="white"
+        )
+        self.overwrite_check.pack(anchor="w")
+        
+        self.debug_var = ctk.BooleanVar(value=False)
+        self.debug_check = ctk.CTkCheckBox(
+            toggle_frame,
+            text="Detayli log goster",
+            font=FONT_LABEL,
+            variable=self.debug_var,
+            fg_color=COLORS["accent"],
+            hover_color=COLORS["accent_light"],
+            border_color=COLORS["border"],
+            text_color=COLORS["text_primary"],
+            checkmark_color="white"
+        )
+        self.debug_check.pack(anchor="w", pady=(4, 0))
+        
+        # DONUSTUR butonu
+        self.convert_btn = ctk.CTkButton(
+            right_panel,
+            text="▶   D O N U S T U R",
+            font=("Segoe UI", 12, "bold"),
+            height=52,
+            fg_color=COLORS["btn_convert"],
+            hover_color=COLORS["btn_convert_hover"],
+            border_width=2,
+            border_color=COLORS["btn_convert_border"],
+            text_color=COLORS["accent_light"],
+            command=self._start_conversion
+        )
+        self.convert_btn.pack(fill="x", padx=12, pady=(4, 12))
+        
+        # Genel ilerleme
+        progress_frame = ctk.CTkFrame(right_panel, fg_color="transparent")
+        progress_frame.pack(fill="x", padx=12, pady=(0, 8))
+        
+        self.progress_label = ctk.CTkLabel(
+            progress_frame,
+            text="Genel Ilerleme - 0/0 dosya",
+            font=FONT_LABEL,
+            text_color=COLORS["text_muted"]
+        )
+        self.progress_label.pack(anchor="w")
+        
+        self.progress_bar = ctk.CTkProgressBar(
+            progress_frame,
+            height=6,
+            fg_color=COLORS["bg_darkest"],
+            progress_color=COLORS["accent"],
+            corner_radius=3
+        )
+        self.progress_bar.pack(fill="x", pady=(4, 0))
+        self.progress_bar.set(0)
+        
+        # Log alani
+        log_label = ctk.CTkLabel(
+            right_panel,
+            text="LOG",
+            font=FONT_BUTTON,
+            text_color=COLORS["text_muted"]
+        )
+        log_label.pack(anchor="w", padx=12)
+        
+        # Log text widget (tk.Text daha iyi renklendirme icin)
+        log_frame = ctk.CTkFrame(
+            right_panel,
+            fg_color=COLORS["bg_darkest"],
+            border_width=1,
+            border_color=COLORS["border"],
+            corner_radius=4
+        )
+        log_frame.pack(fill="both", expand=True, padx=12, pady=(4, 12))
+        
+        self.log_text = tk.Text(
+            log_frame,
+            font=FONT_MONO,
+            bg=COLORS["bg_darkest"],
+            fg=COLORS["text_mono"],
+            insertbackground=COLORS["text_primary"],
+            selectbackground=COLORS["accent"],
+            relief="flat",
+            padx=8,
+            pady=8,
+            wrap="word"
+        )
+        self.log_text.pack(fill="both", expand=True, padx=2, pady=2)
+        
+        # Log renk tagleri
+        self.log_text.tag_configure("timestamp", foreground="#2a4a6a")
+        self.log_text.tag_configure("info", foreground=COLORS["accent_light"])
+        self.log_text.tag_configure("success", foreground=COLORS["success"])
+        self.log_text.tag_configure("warning", foreground=COLORS["warning"])
+        self.log_text.tag_configure("error", foreground=COLORS["error"])
+        self.log_text.tag_configure("normal", foreground=COLORS["text_mono"])
+        
+        self.log_text.config(state="disabled")
+        
+        # Scrollbar
+        scrollbar = ctk.CTkScrollbar(log_frame, command=self.log_text.yview)
+        scrollbar.pack(side="right", fill="y")
+        self.log_text.config(yscrollcommand=scrollbar.set)
+        
+        # Alt footer - istatistikler
+        stats_frame = ctk.CTkFrame(right_panel, fg_color="transparent", height=36)
+        stats_frame.pack(fill="x", padx=12, pady=(0, 12))
+        stats_frame.pack_propagate(False)
+        
+        # Basarili badge
+        self.success_badge = ctk.CTkLabel(
+            stats_frame,
+            text=" 0 basarili ",
+            font=FONT_MONO_SMALL,
+            fg_color="#0a2a1a",
+            text_color=COLORS["success"],
+            corner_radius=10,
+            padx=8,
+            pady=2
+        )
+        self.success_badge.pack(side="left")
+        
+        # Hata badge
+        self.error_badge = ctk.CTkLabel(
+            stats_frame,
+            text=" 0 hata ",
+            font=FONT_MONO_SMALL,
+            fg_color="#2a1a1a",
+            text_color=COLORS["error"],
+            corner_radius=10,
+            padx=8,
+            pady=2
+        )
+        self.error_badge.pack(side="left", padx=(8, 0))
+        
+        # Rapor butonu
+        self.report_btn = ctk.CTkButton(
+            stats_frame,
+            text="RAPORU KAYDET",
+            font=FONT_BUTTON,
+            width=110,
+            height=26,
+            fg_color=COLORS["bg_panel"],
+            hover_color=COLORS["border_hover"],
+            border_width=1,
+            border_color=COLORS["border"],
+            text_color=COLORS["text_primary"],
+            command=self._save_report
+        )
+        self.report_btn.pack(side="right")
+    
+    # =========================================================================
+    # DOSYA ISLEMLERI
+    # =========================================================================
+    def _add_files(self):
+        """Dosya ekle dialog"""
+        files = filedialog.askopenfilenames(
+            title="Schematic Dosyalari Sec",
+            filetypes=[
+                ("Schematic", "*.schem *.schematic *.litematic"),
+                ("Tum Dosyalar", "*.*")
+            ]
+        )
+        for f in files:
+            self._add_file_to_queue(Path(f))
+    
+    def _add_folder(self):
+        """Klasor ekle"""
+        folder = filedialog.askdirectory(title="Klasor Sec")
+        if folder:
+            folder_path = Path(folder)
+            for ext in ["*.schem", "*.schematic", "*.litematic"]:
+                for f in folder_path.glob(ext):
+                    self._add_file_to_queue(f)
+    
+    def _add_file_to_queue(self, path: Path):
+        """Dosyayi kuyruga ekle"""
+        # Zaten eklenmis mi?
+        for item in self.files_queue:
+            if item["path"] == path:
+                return
+        
+        self.files_queue.append({
+            "path": path,
+            "status": FileStatus.PENDING,
+            "progress": 0,
+            "widget": None
+        })
+        
+        self._refresh_file_list()
+    
+    def _refresh_file_list(self):
+        """Dosya listesini yenile"""
+        # Mevcut widgetlari temizle
+        for widget in self.file_list_frame.winfo_children():
+            widget.destroy()
+        
+        if not self.files_queue:
+            self.empty_label = ctk.CTkLabel(
+                self.file_list_frame,
+                text="Dosya eklemek icin + DOSYA butonunu kullanin",
+                font=FONT_LABEL,
+                text_color=COLORS["text_muted"],
+                justify="center"
+            )
+            self.empty_label.pack(expand=True, pady=40)
+            return
+        
+        for i, item in enumerate(self.files_queue):
+            self._create_file_row(item, i)
+    
+    def _create_file_row(self, item: dict, index: int):
+        """Dosya satiri olustur"""
+        row = ctk.CTkFrame(
+            self.file_list_frame,
+            fg_color="transparent",
+            height=36
+        )
+        row.pack(fill="x", pady=2)
+        row.pack_propagate(False)
+        
+        # Durum ikonu
+        status = item["status"]
+        if status == FileStatus.SUCCESS:
+            icon = "✓"
+            color = COLORS["success"]
+        elif status == FileStatus.ERROR:
+            icon = "✗"
+            color = COLORS["error"]
+        elif status == FileStatus.PROCESSING:
+            icon = "◌"
+            color = COLORS["warning"]
         else:
-            report_lines.append("Tum dosyalar basariyla donusturuldu.")
-        self.last_report = "\n".join(report_lines)
-        self._event_queue.put(("finished", success, failed))
-
-    def _poll_events(self) -> None:
-        """Worker thread event'lerini alip GUI uzerinde gunceller."""
+            icon = "○"
+            color = COLORS["text_muted"]
+        
+        icon_label = ctk.CTkLabel(
+            row,
+            text=f"[{icon}]",
+            font=FONT_MONO,
+            text_color=color,
+            width=30
+        )
+        icon_label.pack(side="left")
+        
+        # Dosya adi
+        name = item["path"].name
+        if len(name) > 28:
+            name = name[:25] + "..."
+        
+        name_label = ctk.CTkLabel(
+            row,
+            text=name,
+            font=FONT_MONO,
+            text_color=COLORS["text_primary"],
+            anchor="w"
+        )
+        name_label.pack(side="left", fill="x", expand=True)
+        
+        # Durum etiketi
+        status_text = f"[{status}]"
+        status_label = ctk.CTkLabel(
+            row,
+            text=status_text,
+            font=FONT_MONO_SMALL,
+            text_color=color,
+            width=60
+        )
+        status_label.pack(side="right")
+        
+        # Progress bar (islem sirasinda)
+        if status == FileStatus.PROCESSING:
+            progress = ctk.CTkProgressBar(
+                row,
+                height=2,
+                fg_color=COLORS["bg_dark"],
+                progress_color=COLORS["accent"],
+                corner_radius=1,
+                width=100
+            )
+            progress.pack(side="right", padx=(0, 8))
+            progress.set(item["progress"] / 100)
+        
+        item["widget"] = row
+    
+    def _remove_selected(self):
+        """Secili dosyayi kaldir (son eklenen)"""
+        if self.files_queue:
+            self.files_queue.pop()
+            self._refresh_file_list()
+    
+    def _clear_all(self):
+        """Tum dosyalari temizle"""
+        self.files_queue.clear()
+        self._refresh_file_list()
+    
+    def _select_output_dir(self):
+        """Cikti dizini sec"""
+        folder = filedialog.askdirectory(title="Cikti Dizini Sec")
+        if folder:
+            self.output_dir = Path(folder)
+            self.output_entry.delete(0, "end")
+            self.output_entry.insert(0, str(self.output_dir))
+    
+    # =========================================================================
+    # DONUSUM
+    # =========================================================================
+    def _start_conversion(self):
+        """Donusumu baslat"""
+        if self.is_converting:
+            return
+        
+        if not self.files_queue:
+            messagebox.showwarning("Uyari", "Donusturmek icin dosya ekleyin!")
+            return
+        
+        self.is_converting = True
+        self.success_count = 0
+        self.error_count = 0
+        
+        # Butonu devre disi birak
+        self.convert_btn.configure(
+            text="◌   D O N U S T U R U L U Y O R . . .",
+            state="disabled"
+        )
+        
+        # Thread'de calistir
+        thread = threading.Thread(target=self._convert_files, daemon=True)
+        thread.start()
+    
+    def _convert_files(self):
+        """Dosyalari donustur (thread)"""
+        total = len(self.files_queue)
+        mapper = BlockMapper()
+        
+        for i, item in enumerate(self.files_queue):
+            # Durumu guncelle
+            item["status"] = FileStatus.PROCESSING
+            item["progress"] = 0
+            self._queue_ui_update()
+            
+            try:
+                path = item["path"]
+                self._log(f"Isleniyor: {path.name}", "info")
+                
+                # Oku
+                item["progress"] = 25
+                self._queue_ui_update()
+                blocks = read_schematic(path)
+                self._log(f"  Okunan blok: {len(blocks)}", "normal")
+                
+                # Donustur
+                item["progress"] = 50
+                self._queue_ui_update()
+                mapped = mapper.map_blocks(blocks)
+                self._log(f"  Donusturulen: {len(mapped)}", "normal")
+                
+                # Yaz
+                item["progress"] = 75
+                self._queue_ui_update()
+                
+                output_path = self.output_dir / f"{path.stem}.prefab.json"
+                write_prefab(mapped, output_path)
+                
+                item["progress"] = 100
+                item["status"] = FileStatus.SUCCESS
+                self.success_count += 1
+                self._log(f"  Kaydedildi: {output_path.name}", "success")
+                
+            except Exception as e:
+                item["status"] = FileStatus.ERROR
+                self.error_count += 1
+                self._log(f"  HATA: {str(e)}", "error")
+            
+            # Ilerlemeyi guncelle
+            progress = (i + 1) / total
+            self.log_queue.put(("progress", progress, i + 1, total))
+            self._queue_ui_update()
+        
+        # Tamamlandi
+        self.is_converting = False
+        self.log_queue.put(("done", None, None, None))
+        self._queue_ui_update()
+    
+    def _queue_ui_update(self):
+        """UI guncellemesi icin sinyal gonder"""
+        self.log_queue.put(("refresh", None, None, None))
+    
+    def _log(self, message: str, level: str = "normal"):
+        """Log mesaji ekle"""
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        self.log_queue.put(("log", timestamp, message, level))
+    
+    def _check_log_queue(self):
+        """Log queue'u kontrol et"""
         try:
             while True:
-                event = self._event_queue.get_nowait()
-                self._handle_event(event)
+                msg_type, arg1, arg2, arg3 = self.log_queue.get_nowait()
+                
+                if msg_type == "log":
+                    self._add_log_entry(arg1, arg2, arg3)
+                elif msg_type == "progress":
+                    self.progress_bar.set(arg1)
+                    self.progress_label.configure(
+                        text=f"Genel Ilerleme - {arg2}/{arg3} dosya"
+                    )
+                elif msg_type == "refresh":
+                    self._refresh_file_list()
+                    self._update_stats()
+                elif msg_type == "done":
+                    self.convert_btn.configure(
+                        text="▶   D O N U S T U R",
+                        state="normal"
+                    )
+                    self._log(f"Tamamlandi: {self.success_count} basarili, {self.error_count} hata", 
+                             "success" if self.error_count == 0 else "warning")
         except queue.Empty:
             pass
-        self.root.after(100, self._poll_events)
+        
+        self.after(100, self._check_log_queue)
+    
+    def _add_log_entry(self, timestamp: str, message: str, level: str):
+        """Log satirini ekle"""
+        self.log_text.config(state="normal")
+        
+        # Timestamp
+        self.log_text.insert("end", f"[{timestamp}] ", "timestamp")
+        
+        # Mesaj
+        self.log_text.insert("end", f"{message}\n", level)
+        
+        self.log_text.see("end")
+        self.log_text.config(state="disabled")
+    
+    def _update_stats(self):
+        """Istatistikleri guncelle"""
+        self.success_badge.configure(text=f" {self.success_count} basarili ")
+        self.error_badge.configure(text=f" {self.error_count} hata ")
+    
+    def _save_report(self):
+        """Raporu kaydet"""
+        report_path = self.output_dir / f"conversion_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+        
+        with open(report_path, "w", encoding="utf-8") as f:
+            f.write("HYTALE CONVERTER - DONUSUM RAPORU\n")
+            f.write("=" * 50 + "\n")
+            f.write(f"Tarih: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"Toplam: {len(self.files_queue)} dosya\n")
+            f.write(f"Basarili: {self.success_count}\n")
+            f.write(f"Hata: {self.error_count}\n")
+            f.write("=" * 50 + "\n\n")
+            
+            for item in self.files_queue:
+                status = item["status"]
+                f.write(f"[{status}] {item['path'].name}\n")
+        
+        self._log(f"Rapor kaydedildi: {report_path.name}", "success")
+        messagebox.showinfo("Rapor", f"Rapor kaydedildi:\n{report_path}")
 
-    def _handle_event(self, event: tuple) -> None:
-        """Event tipine gore satir ve genel durum bilgisini yeniler."""
-        etype = event[0]
-        if etype == "file_start":
-            path = event[1]
-            self._log(f"Donusum basladi: {Path(path).name}")
-            if path in self.item_widgets:
-                self.item_widgets[path].set_status("⏳")
-                self.item_widgets[path].set_progress(0.1)
-        elif etype == "file_progress":
-            path, value = event[1], event[2]
-            if path in self.item_widgets:
-                self.item_widgets[path].set_progress(float(value))
-        elif etype == "file_done":
-            path, ok, error = event[1], event[2], event[3]
-            for item in self.queue_items:
-                if item.path == path:
-                    item.status = "done" if ok else "error"
-                    item.error = error
-                    break
-            if path in self.item_widgets:
-                self.item_widgets[path].set_progress(1.0)
-                self.item_widgets[path].set_status("✅" if ok else "❌")
-            if ok:
-                self._log(f"Basarili: {Path(path).name}")
-            else:
-                self._log(f"Hata: {Path(path).name} -> {error}")
-        elif etype == "overall_progress":
-            self.overall_progress.set(float(event[1]))
-        elif etype == "finished":
-            success, failed = event[1], event[2]
-            self.convert_button.configure(state="normal")
-            self.summary_label.configure(
-                text=f"Donusum bitti | Basarili: {success} | Hatali: {failed}"
-            )
-            self._log("Toplu donusum tamamlandi.")
 
-    def _log(self, message: str) -> None:
-        """Log alanina zaman damgasi ile yeni satir ekler."""
-        ts = datetime.now().strftime("%H:%M:%S")
-        line = f"[{ts}] {message}\n"
-        self.log_box.configure(state="normal")
-        self.log_box.insert("end", line)
-        self.log_box.see("end")
-        self.log_box.configure(state="disabled")
+# =============================================================================
+# MAIN
+# =============================================================================
+def run():
+    """Uygulamayi baslat"""
+    app = HytaleConverterApp()
+    app.mainloop()
 
-    def save_report(self) -> None:
-        """Son olusturulan raporu .txt dosyasina kaydeder."""
-        if not self.last_report:
-            messagebox.showinfo("Bilgi", "Henuz kaydedilecek rapor yok.")
-            return
-        target = filedialog.asksaveasfilename(
-            title="Raporu Kaydet",
-            defaultextension=".txt",
-            filetypes=[("Text Files", "*.txt")],
-        )
-        if not target:
-            return
-        try:
-            Path(target).write_text(self.last_report, encoding="utf-8")
-            self._log(f"Rapor kaydedildi: {target}")
-        except Exception as exc:
-            err = f"Rapor kaydedilemedi: {exc}"
-            self._log(err)
-            messagebox.showerror("Hata", err)
+
+if __name__ == "__main__":
+    run()
