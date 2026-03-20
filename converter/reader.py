@@ -285,9 +285,12 @@ def _read_sponge_v3(root) -> list[dict]:
     indices = _decode_varints(bytes(block_data))
 
     result: list[dict] = []
+    # Air blok isimleri - stairs hariç tutulmalı (st-air-s false positive)
+    AIR_BLOCKS = ("minecraft:air", "minecraft:cave_air", "minecraft:void_air")
+    
     for i, idx in enumerate(indices):
         name = index_to_name.get(idx, "")
-        if not name or "air" in name:
+        if not name or name in AIR_BLOCKS:
             continue
 
         y = i // (width * length)

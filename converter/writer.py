@@ -10,12 +10,13 @@ def write_prefab(blocks: list[dict], output_path: Path) -> None:
 
     blocks: [{"x": int, "y": int, "z": int, "name": str}, ...]
     """
-    # Boş name, None, ve "air" içerenleri filtrele
+    # Boş name ve None değerleri filtrele
+    # NOT: "air" kelimesi içerenleri FİLTRELEME - stairs, chair vb. false positive veriyor
+    # Air blokları zaten reader tarafından filtreleniyor
     clean_blocks = [
         b for b in blocks 
         if b is not None 
         and b.get("name", "") != ""
-        and "air" not in b.get("name", "").lower()
     ]
     
     print(f"[WRITER] Toplam blok: {len(blocks)}, Filtre sonrası: {len(clean_blocks)}")
