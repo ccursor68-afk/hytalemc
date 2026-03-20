@@ -6,14 +6,23 @@ from pathlib import Path
 BLOCK_MAP_PATH = Path(__file__).resolve().parent.parent / "data" / "block_map.json"
 FALLBACK_BLOCK = "Rock_Stone_Brick"
 
-# Şüpheli/test blokları güvenli alternatiflerle değiştir
-# Bu bloklar bazı Hytale versiyonlarında çökmeye neden olabilir
-SAFE_REPLACEMENTS = {
-    "Prototype_Rock_Concrete_Brick": "Rock_Stone_Brick",
-    "Prototype_Rock_Concrete_Smooth": "Rock_Stone_Brick_Smooth",
-    "Rock_Crystal_White_Block": "Rock_Stone_Brick_Smooth",
-    # Bitki blokları da sorun çıkarabilir
-    "Plant_Fern_Forest": "Plant_Grass_Sharp",
+# Minecraft yön -> Hytale rotation eşleştirmesi
+# Minecraft: north=0, south=2, west=1, east=3, up=1, down=0
+# Hytale rotation: 0, 1, 2, 3 (90 derece döndürme)
+FACING_TO_ROTATION = {
+    "north": 0,
+    "south": 2,
+    "east": 1,
+    "west": 3,
+    "up": 0,
+    "down": 0,
+}
+
+# Minecraft axis -> Hytale rotation
+AXIS_TO_ROTATION = {
+    "y": 0,
+    "x": 1,
+    "z": 2,
 }
 
 
@@ -43,12 +52,6 @@ class BlockMapper:
         mapping = {k: v for k, v in raw.items() if not k.startswith("_")}
         print(f"[MAPPER] block_map.json yüklendi: {len(mapping)} blok tanımı")
         
-        # Örnek eşlemeleri göster
-        test_keys = ["minecraft:stone", "minecraft:dirt", "minecraft:oak_log", "minecraft:cobblestone"]
-        for key in test_keys:
-            if key in mapping:
-                print(f"[MAPPER] Örnek: '{key}' -> '{mapping[key]}'")
-        
         return mapping
 
     def _clean_name(self, name: str) -> str:
@@ -57,6 +60,43 @@ class BlockMapper:
         name = name.split("[")[0]
         return name.lower().strip()
 
+    def _extract_rotation(self, minecraft_name: str) -> int | None:
+        """Minecraft blok state'inden rotation değerini çıkarır."""
+        # "minecraft:oak_stairs[facing=north,half=bottom]" formatından rotation çıkar
+        if "[" not in minecraft_name:
+            return None
+        
+        try:
+            props_str = minecraft_name.split("[")[1].rstrip("]")
+            props = {}
+            for prop in props_str.split(","):
+                if "=" in prop:
+                    key, value = prop.split("=", 1)
+                    props[key.strip()] = value.strip()
+            
+            # facing property varsa
+            if "facing" in props:
+                return FACING_TO_ROTATION.get(props["facing"], 0)
+            
+            # axis property varsa (log blokları için)
+            if "axis" in props:
+                return AXIS_TO_ROTATION.get(props["axis"], 0)
+            
+            # half property varsa (slab'lar için)
+            if "half" in props:
+                if props["half"] == "top":
+                    return 8  # Hytale'de top slab rotation=8
+                    
+            # type property varsa (slab'lar için)
+            if "type" in props:
+                if props["type"] == "top":
+                    return 8
+                    
+        except Exception:
+            pass
+        
+        return None
+
     def map_block(self, minecraft_name: str, x: int, y: int, z: int) -> dict | None:
         """
         Minecraft blok adini Hytale adina cevirir.
@@ -64,10 +104,12 @@ class BlockMapper:
         """
         clean_name = self._clean_name(minecraft_name)
         hytale_name = self.mapping.get(clean_name)
+        rotation = self._extract_rotation(minecraft_name)
 
         # DEBUG: ilk 20 blok eslemesini konsola yazdirir.
         if self._debug_count < 20:
-            print(f"[MAPPER DEBUG] raw='{minecraft_name}' clean='{clean_name}' result='{hytale_name}'")
+            rot_str = f" rot={rotation}" if rotation is not None else ""
+            print(f"[MAPPER DEBUG] raw='{minecraft_name}' -> '{hytale_name}'{rot_str}")
             self._debug_count += 1
 
         if hytale_name is None:
@@ -82,14 +124,13 @@ class BlockMapper:
             # Bos mapping degeri "yazma/atla" demektir (air, torch vb.).
             return None
 
-        # Şüpheli blokları güvenli alternatiflerle değiştir
-        if hytale_name in SAFE_REPLACEMENTS:
-            safe_name = SAFE_REPLACEMENTS[hytale_name]
-            if self._debug_count < 5:
-                print(f"[MAPPER] Güvenli değişim: '{hytale_name}' -> '{safe_name}'")
-            hytale_name = safe_name
-
-        return {"x": x, "y": y, "z": z, "name": hytale_name}
+        result = {"x": x, "y": y, "z": z, "name": hytale_name}
+        
+        # Rotation varsa ekle
+        if rotation is not None:
+            result["rotation"] = rotation
+        
+        return result
 
     def map_blocks(self, blocks: list[dict]) -> list[dict]:
         """Blok listesini prefab'in bekledigi x,y,z,name formatina donusturur."""

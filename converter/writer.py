@@ -45,16 +45,22 @@ def write_prefab(blocks: list[dict], output_path: Path) -> None:
         print(f"[WRITER] Boyut: {size_x}x{size_y}x{size_z}")
     
     # Hytale prefab formatına çevir
-    # Format: {"x": int, "y": int, "z": int, "name": str}
-    # hytale: prefix EKLEME - Hytale'in give komutu prefix olmadan kullanılıyor
+    # Format: {"x": int, "y": int, "z": int, "name": str, "rotation"?: int, "support"?: int}
     hytale_blocks = []
     for b in clean_blocks:
-        hytale_blocks.append({
+        block_entry = {
             "x": b['x'],
             "y": b['y'], 
             "z": b['z'],
-            "name": b['name']  # Soil_Dirt formatında, prefix yok
-        })
+            "name": b['name']
+        }
+        # rotation varsa ekle
+        if 'rotation' in b:
+            block_entry['rotation'] = b['rotation']
+        # support varsa ekle (yaprak blokları için)
+        if 'support' in b:
+            block_entry['support'] = b['support']
+        hytale_blocks.append(block_entry)
     
     prefab = {
         "version": 8,
