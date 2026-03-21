@@ -24,26 +24,38 @@ def read_schematic(file_path: Path) -> list[dict]:
     except Exception as e:
         raise ValueError(f"NBT okunamadı: {e}")
 
-    # Root key'i bul (bazen "" bazen "Schematic" bazen başka bir şey)
     root = _get_root(nbt)
+
+    # Tüm root key'lerini logla (debug)
+    try:
+        print(f"[READER DEBUG] Root key'ler: {list(root.keys())}")
+    except:
+        pass
+
+    version = _get_int(root, "Version", 0)
+    print(f"[READER DEBUG] Format: {suffix}, Version: {version}")
 
     if suffix == ".schematic":
         return _read_legacy(root)
     elif suffix in (".schem", ".litematic"):
-        # Sponge versiyonunu tespit et
-        version = _get_int(root, "Version", 1)
         if version >= 3:
+            print("[READER DEBUG] Sponge v3 formatı deneniyor")
             return _read_sponge_v3(root)
+        elif version == 2 or version == 1:
+            print("[READER DEBUG] Sponge v2 formatı deneniyor")
+            return _read_sponge_v2(root)
         else:
-            return _read_sponge_v2(root)
+            # Version yoksa içeriğe bak
+            if root.get("Palette"):
+                print("[READER DEBUG] Version yok, Palette var → v2 deneniyor")
+                return _read_sponge_v2(root)
+            elif root.get("Blocks"):
+                print("[READER DEBUG] Version yok, Blocks var → v3 deneniyor")
+                return _read_sponge_v3(root)
+            else:
+                raise ValueError(f"Format tespit edilemedi. Key'ler: {list(root.keys())}")
     else:
-        # Uzantı bilinmiyor, içeriğe bakarak tahmin et
-        if "Palette" in root:
-            return _read_sponge_v2(root)
-        blocks_val = root.get("Blocks")
-        if "Blocks" in root and isinstance(blocks_val, nbtlib.ByteArray):
-            return _read_legacy(root)
-        raise ValueError("Desteklenmeyen format")
+        raise ValueError(f"Desteklenmeyen uzantı: {suffix}")
 
 
 def _get_root(nbt):
@@ -188,6 +200,9 @@ def _read_sponge_v2(root) -> list[dict]:
     Sponge Schematic v1/v2 formatı.
     Palette (isim→index) + BlockData (varint array) içerir.
     """
+    # Air blok isimleri - stairs hariç tutulmalı (st-air-s false positive)
+    AIR_BLOCKS = ("minecraft:air", "minecraft:cave_air", "minecraft:void_air")
+    
     # Boyutlar - farklı key isimleri olabilir
     width = (
         _get_int(root, "Width")
@@ -233,7 +248,7 @@ def _read_sponge_v2(root) -> list[dict]:
     result: list[dict] = []
     for i, idx in enumerate(indices):
         name = index_to_name.get(idx, "")
-        if not name or name in ("minecraft:air", "minecraft:cave_air", "minecraft:void_air"):
+        if not name or name in AIR_BLOCKS:
             continue
 
         y = i // (width * length)
@@ -254,40 +269,75 @@ def _read_sponge_v2(root) -> list[dict]:
 # -------------------------------------------------------------------
 def _read_sponge_v3(root) -> list[dict]:
     """
-    Sponge Schematic v3 formatı.
-    Blocks altında Palette + Data içerir.
+    Sponge Schematic v3 — birden fazla yapıyı dene.
     """
-    # v3'te veriler "Blocks" key'i altında
-    blocks_section = root.get("Blocks")
-    if blocks_section is None:
-        raise ValueError("Sponge v3: 'Blocks' section bulunamadı")
+    # Air blok isimleri - stairs hariç tutulmalı (st-air-s false positive)
+    AIR_BLOCKS = ("minecraft:air", "minecraft:cave_air", "minecraft:void_air")
 
-    # Boyutlar root'ta
-    width = _get_int(root, "Width")
-    height = _get_int(root, "Height")
-    length = _get_int(root, "Length")
+    # DENEME 1: Standart v3 — "Blocks" altında Palette + Data
+    blocks_section = root.get("Blocks")
+
+    # DENEME 2: Bazı araçlar "blocks" (küçük harf) yazar
+    if blocks_section is None:
+        blocks_section = root.get("blocks")
+
+    # DENEME 3: Bazı v3 dosyaları Palette'i direkt root'ta tutar (v2 gibi)
+    if blocks_section is None and root.get("Palette") is not None:
+        print("[READER DEBUG] v3'te Palette root'ta bulundu → v2 olarak okuyorum")
+        return _read_sponge_v2(root)
+
+    # DENEME 4: "Schematic" wrapper içinde
+    if blocks_section is None and root.get("Schematic") is not None:
+        inner = root["Schematic"]
+        blocks_section = inner.get("Blocks") or inner.get("blocks")
+        if blocks_section is None and inner.get("Palette"):
+            print("[READER DEBUG] Schematic wrapper içinde Palette bulundu → v2 olarak okuyorum")
+            return _read_sponge_v2(inner)
+        root = inner  # boyutlar da inner'da
+
+    if blocks_section is None:
+        # Son çare: tüm key'leri logla ve daha iyi hata ver
+        keys = list(root.keys()) if hasattr(root, 'keys') else str(type(root))
+        raise ValueError(
+            f"Sponge v3: 'Blocks' section bulunamadı. "
+            f"Mevcut key'ler: {keys}"
+        )
+
+    # Boyutlar
+    width = _get_int(root, "Width") or _get_int(root, "width")
+    height = _get_int(root, "Height") or _get_int(root, "height")
+    length = _get_int(root, "Length") or _get_int(root, "length")
 
     if width == 0 or height == 0 or length == 0:
         raise ValueError(f"Geçersiz boyutlar: {width}x{height}x{length}")
 
-    palette_tag = blocks_section.get("Palette")
+    # Palette
+    palette_tag = (
+        blocks_section.get("Palette") or
+        blocks_section.get("palette") or
+        root.get("Palette")
+    )
     if palette_tag is None:
-        raise ValueError("Sponge v3: Blocks.Palette bulunamadı")
+        raise ValueError("Sponge v3: Palette bulunamadı")
 
     index_to_name: dict[int, str] = {}
     for name, idx in palette_tag.items():
         index_to_name[int(idx)] = str(name)
 
-    block_data = blocks_section.get("Data")
+    # Block data
+    block_data = None
+    for key in ["Data", "data", "BlockData"]:
+        if key in blocks_section:
+            block_data = blocks_section[key]
+            break
+    
     if block_data is None:
-        raise ValueError("Sponge v3: Blocks.Data bulunamadı")
+        keys = list(blocks_section.keys()) if hasattr(blocks_section, 'keys') else str(type(blocks_section))
+        raise ValueError(f"Sponge v3: Block Data bulunamadı. Blocks key'leri: {keys}")
 
     indices = _decode_varints(bytes(block_data))
 
     result: list[dict] = []
-    # Air blok isimleri - stairs hariç tutulmalı (st-air-s false positive)
-    AIR_BLOCKS = ("minecraft:air", "minecraft:cave_air", "minecraft:void_air")
-    
     for i, idx in enumerate(indices):
         name = index_to_name.get(idx, "")
         if not name or name in AIR_BLOCKS:
