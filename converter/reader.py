@@ -34,36 +34,45 @@ def read_schematic(file_path: Path) -> list[dict]:
     # Litematica formatı tespiti (Regions key'i var mı?)
     if "Regions" in keys:
         print("[READER] Litematica formatı tespit edildi")
-        return _read_litematica(root)
-
-    if suffix == ".schematic":
+        blocks = _read_litematica(root)
+    elif suffix == ".schematic":
         print("[READER] Legacy MCEdit formatı")
-        return _read_legacy(root)
-
+        blocks = _read_legacy(root)
     elif suffix in (".schem", ".litematic"):
         if version >= 3:
             print("[READER] Sponge v3 formatı")
-            return _read_sponge_v3(root)
+            blocks = _read_sponge_v3(root)
         elif version in (1, 2):
             print("[READER] Sponge v2 formatı")
-            return _read_sponge_v2(root)
+            blocks = _read_sponge_v2(root)
         else:
             # Version yok → içeriğe bak
             if root.get("Palette"):
                 print("[READER] Sponge v2 formatı (Palette bulundu)")
-                return _read_sponge_v2(root)
+                blocks = _read_sponge_v2(root)
             elif root.get("Blocks"):
                 print("[READER] Sponge v3 formatı (Blocks bulundu)")
-                return _read_sponge_v3(root)
+                blocks = _read_sponge_v3(root)
             else:
                 raise ValueError(f"Format tespit edilemedi. Key'ler: {keys}")
     else:
         raise ValueError(f"Desteklenmeyen uzantı: {suffix}")
 
+    # Koordinat debug bilgisi
+    if blocks:
+        xs = [b["x"] for b in blocks]
+        ys = [b["y"] for b in blocks]
+        zs = [b["z"] for b in blocks]
+        print(f"[READER] Blok sayısı: {len(blocks)}")
+        print(f"[READER] X: {min(xs)} → {max(xs)} (genişlik: {max(xs)-min(xs)+1})")
+        print(f"[READER] Y: {min(ys)} → {max(ys)} (yükseklik: {max(ys)-min(ys)+1})")
+        print(f"[READER] Z: {min(zs)} → {max(zs)} (derinlik: {max(zs)-min(zs)+1})")
+
+    return blocks
+
 
 def _get_root(nbt):
     """NBT dosyasının root tag'ini döndür"""
-    # nbtlib bazen root'u direkt, bazen wrapper içinde verir
     if "" in nbt:
         return nbt[""]
     if "Schematic" in nbt:
@@ -80,6 +89,37 @@ def _get_int(tag, key, default=0):
         return default
 
 
+def _normalize_coords(blocks: list[dict]) -> list[dict]:
+    """
+    Koordinatları normalize et: minimum x/y/z = 0 olsun.
+    Böylece prefab her zaman 0,0,0'dan başlar.
+    """
+    if not blocks:
+        return blocks
+
+    min_x = min(b["x"] for b in blocks)
+    min_y = min(b["y"] for b in blocks)
+    min_z = min(b["z"] for b in blocks)
+
+    # Sadece negatif veya çok büyük offset varsa normalize et
+    if min_x != 0 or min_y != 0 or min_z != 0:
+        print(f"[READER] Koordinatlar normalize ediliyor: offset ({min_x}, {min_y}, {min_z})")
+        normalized = []
+        for b in blocks:
+            new_block = {
+                "x": b["x"] - min_x,
+                "y": b["y"] - min_y,
+                "z": b["z"] - min_z,
+                "name": b["name"]
+            }
+            # rotation varsa koru
+            if "rotation" in b:
+                new_block["rotation"] = b["rotation"]
+            normalized.append(new_block)
+        return normalized
+    return blocks
+
+
 # -------------------------------------------------------------------
 # FORMAT 1: Legacy .schematic (MCEdit)
 # -------------------------------------------------------------------
@@ -87,6 +127,7 @@ def _read_legacy(root) -> list[dict]:
     """
     Eski MCEdit .schematic formatı.
     Bloklar sayısal ID (byte array) olarak saklanır.
+    Koordinat sırası: Y * (Length * Width) + Z * Width + X
     """
     LEGACY_IDS = {
         0: "",
@@ -162,6 +203,8 @@ def _read_legacy(root) -> list[dict]:
     height = _get_int(root, "Height")
     length = _get_int(root, "Length")
 
+    print(f"[READER] Legacy boyutlar: {width}x{height}x{length} (WxHxL)")
+
     if width == 0 or height == 0 or length == 0:
         raise ValueError(f"Geçersiz boyutlar: {width}x{height}x{length}")
 
@@ -185,6 +228,7 @@ def _read_legacy(root) -> list[dict]:
         if not name:
             continue
 
+        # Legacy koordinat sırası: Y * (Length * Width) + Z * Width + X
         y = i // (width * length)
         z = (i % (width * length)) // width
         x = i % width
@@ -192,7 +236,7 @@ def _read_legacy(root) -> list[dict]:
         result.append({"x": x, "y": y, "z": z, "name": name})
 
     print(f"[READER] Legacy format okundu: {len(result)} blok (air hariç)")
-    return result
+    return _normalize_coords(result)
 
 
 # -------------------------------------------------------------------
@@ -202,11 +246,10 @@ def _read_sponge_v2(root) -> list[dict]:
     """
     Sponge Schematic v1/v2 formatı.
     Palette (isim→index) + BlockData (varint array) içerir.
+    Koordinat sırası: (Y * length + Z) * width + X
     """
-    # Air blok isimleri - stairs hariç tutulmalı (st-air-s false positive)
     AIR_BLOCKS = ("minecraft:air", "minecraft:cave_air", "minecraft:void_air")
 
-    # Boyutlar - farklı key isimleri olabilir
     width = (
         _get_int(root, "Width")
         or _get_int(root, "width")
@@ -223,29 +266,31 @@ def _read_sponge_v2(root) -> list[dict]:
         or _get_int(root.get("Metadata", {}), "Length", 0)
     )
 
+    print(f"[READER] Sponge v2 boyutlar: {width}x{height}x{length} (WxHxL)")
+
     if width == 0 or height == 0 or length == 0:
         raise ValueError(f"Geçersiz boyutlar: {width}x{height}x{length}")
 
-    # Palette: {"minecraft:stone": 0, "minecraft:air": 1, ...}
-    palette_tag = root.get("Palette")
-    if palette_tag is None:
-        palette_tag = root.get("palette")
+    palette_tag = None
+    for key in ["Palette", "palette"]:
+        if key in root:
+            palette_tag = root[key]
+            break
     if palette_tag is None:
         raise ValueError("Sponge v2: 'Palette' bulunamadı")
 
-    # Palette'i {index: name} formatına çevir
     index_to_name: dict[int, str] = {}
     for name, idx in palette_tag.items():
         index_to_name[int(idx)] = str(name)
 
-    # BlockData: varint encoded byte array
-    block_data = root.get("BlockData")
-    if block_data is None:
-        block_data = root.get("blockData")
+    block_data = None
+    for key in ["BlockData", "blockData"]:
+        if key in root:
+            block_data = root[key]
+            break
     if block_data is None:
         raise ValueError("Sponge v2: 'BlockData' bulunamadı")
 
-    # Varint decode
     indices = _decode_varints(bytes(block_data))
 
     result: list[dict] = []
@@ -254,6 +299,7 @@ def _read_sponge_v2(root) -> list[dict]:
         if not name or name in AIR_BLOCKS:
             continue
 
+        # Sponge v2 koordinat sırası: (Y * length + Z) * width + X
         y = i // (width * length)
         z = (i % (width * length)) // width
         x = i % width
@@ -261,10 +307,7 @@ def _read_sponge_v2(root) -> list[dict]:
         result.append({"x": x, "y": y, "z": z, "name": name})
 
     print(f"[READER] Sponge v2 format okundu: {len(result)} blok (air hariç)")
-    # İlk 5 bloğu debug için göster
-    for b in result[:5]:
-        print(f"[READER DEBUG] Örnek blok: {b}")
-    return result
+    return _normalize_coords(result)
 
 
 # -------------------------------------------------------------------
@@ -272,49 +315,37 @@ def _read_sponge_v2(root) -> list[dict]:
 # -------------------------------------------------------------------
 def _read_sponge_v3(root) -> list[dict]:
     """
-    Sponge Schematic v3 — birden fazla yapıyı dene.
+    Sponge Schematic v3 formatı.
+    Koordinat sırası: (Y * length + Z) * width + X
     """
-    # Air blok isimleri - stairs hariç tutulmalı (st-air-s false positive)
     AIR_BLOCKS = ("minecraft:air", "minecraft:cave_air", "minecraft:void_air")
 
-    # DENEME 1: Standart v3 — "Blocks" altında Palette + Data
-    blocks_section = root.get("Blocks")
+    blocks_section = root.get("Blocks") or root.get("blocks")
 
-    # DENEME 2: Bazı araçlar "blocks" (küçük harf) yazar
-    if blocks_section is None:
-        blocks_section = root.get("blocks")
-
-    # DENEME 3: Bazı v3 dosyaları Palette'i direkt root'ta tutar (v2 gibi)
     if blocks_section is None and root.get("Palette") is not None:
         print("[READER DEBUG] v3'te Palette root'ta bulundu → v2 olarak okuyorum")
         return _read_sponge_v2(root)
 
-    # DENEME 4: "Schematic" wrapper içinde
     if blocks_section is None and root.get("Schematic") is not None:
         inner = root["Schematic"]
         blocks_section = inner.get("Blocks") or inner.get("blocks")
         if blocks_section is None and inner.get("Palette"):
-            print("[READER DEBUG] Schematic wrapper içinde Palette bulundu → v2 olarak okuyorum")
             return _read_sponge_v2(inner)
-        root = inner  # boyutlar da inner'da
+        root = inner
 
     if blocks_section is None:
-        # Son çare: tüm key'leri logla ve daha iyi hata ver
         keys = list(root.keys()) if hasattr(root, 'keys') else str(type(root))
-        raise ValueError(
-            f"Sponge v3: 'Blocks' section bulunamadı. "
-            f"Mevcut key'ler: {keys}"
-        )
+        raise ValueError(f"Sponge v3: 'Blocks' section bulunamadı. Key'ler: {keys}")
 
-    # Boyutlar
     width = _get_int(root, "Width") or _get_int(root, "width")
     height = _get_int(root, "Height") or _get_int(root, "height")
     length = _get_int(root, "Length") or _get_int(root, "length")
 
+    print(f"[READER] Sponge v3 boyutlar: {width}x{height}x{length} (WxHxL)")
+
     if width == 0 or height == 0 or length == 0:
         raise ValueError(f"Geçersiz boyutlar: {width}x{height}x{length}")
 
-    # Palette
     palette_tag = None
     for key in ["Palette", "palette"]:
         if key in blocks_section:
@@ -329,7 +360,6 @@ def _read_sponge_v3(root) -> list[dict]:
     for name, idx in palette_tag.items():
         index_to_name[int(idx)] = str(name)
 
-    # Block data
     block_data = None
     for key in ["Data", "data", "BlockData"]:
         if key in blocks_section:
@@ -338,7 +368,7 @@ def _read_sponge_v3(root) -> list[dict]:
 
     if block_data is None:
         keys = list(blocks_section.keys()) if hasattr(blocks_section, 'keys') else str(type(blocks_section))
-        raise ValueError(f"Sponge v3: Block Data bulunamadı. Blocks key'leri: {keys}")
+        raise ValueError(f"Sponge v3: Block Data bulunamadı. Key'ler: {keys}")
 
     indices = _decode_varints(bytes(block_data))
 
@@ -348,6 +378,7 @@ def _read_sponge_v3(root) -> list[dict]:
         if not name or name in AIR_BLOCKS:
             continue
 
+        # Sponge v3 koordinat sırası: (Y * length + Z) * width + X
         y = i // (width * length)
         z = (i % (width * length)) // width
         x = i % width
@@ -355,10 +386,7 @@ def _read_sponge_v3(root) -> list[dict]:
         result.append({"x": x, "y": y, "z": z, "name": name})
 
     print(f"[READER] Sponge v3 format okundu: {len(result)} blok (air hariç)")
-    # İlk 5 bloğu debug için göster
-    for b in result[:5]:
-        print(f"[READER DEBUG] Örnek blok: {b}")
-    return result
+    return _normalize_coords(result)
 
 
 # -------------------------------------------------------------------
@@ -383,7 +411,6 @@ def _read_litematica(root) -> list[dict]:
             all_blocks.extend(blocks)
             print(f"[READER] Bölge '{region_name}': {len(blocks)} blok")
 
-            # Bir sonraki bölge için offset hesapla (yan yana koy)
             size = region.get("Size") or {}
             sx = abs(_get_int(region, "SizeX") or _get_int(size, "x", 0))
             offset_x += sx + 1
@@ -392,35 +419,26 @@ def _read_litematica(root) -> list[dict]:
             continue
 
     print(f"[READER] Litematica format okundu: {len(all_blocks)} blok toplam")
-    return all_blocks
+    return _normalize_coords(all_blocks)
 
 
 def _read_litematica_region(region, off_x=0, off_y=0, off_z=0) -> list[dict]:
     """Tek bir Litematica bölgesini oku"""
     AIR_BLOCKS = ("minecraft:air", "minecraft:cave_air", "minecraft:void_air")
 
-    # Boyutları al (pozitif yap)
     size = region.get("Size") or {}
-    
-    # Size compound tag ise x, y, z key'lerini dene
+
     if hasattr(size, 'get'):
         width = abs(_get_int(size, "x", 0))
         height = abs(_get_int(size, "y", 0))
         length = abs(_get_int(size, "z", 0))
     else:
         width = height = length = 0
-    
-    # Alternatif: Position tag'ından boyut hesapla
+
     if width == 0 or height == 0 or length == 0:
-        # Bazı versiyonlarda farklı key isimleri
-        pos = region.get("Position") or {}
-        size_tag = region.get("Size") or {}
-        
-        # Compound tag list olarak gelebilir
         try:
-            if hasattr(size_tag, '__iter__') and not hasattr(size_tag, 'get'):
-                # Liste formatı [x, y, z]
-                size_list = list(size_tag)
+            if hasattr(size, '__iter__') and not hasattr(size, 'get'):
+                size_list = list(size)
                 if len(size_list) >= 3:
                     width = abs(int(size_list[0]))
                     height = abs(int(size_list[1]))
@@ -429,7 +447,6 @@ def _read_litematica_region(region, off_x=0, off_y=0, off_z=0) -> list[dict]:
             pass
 
     if width == 0 or height == 0 or length == 0:
-        # Son çare: BlockStates uzunluğundan tahmin et
         block_states = region.get("BlockStates")
         if block_states is not None:
             palette_list = region.get("BlockStatePalette") or []
@@ -437,8 +454,7 @@ def _read_litematica_region(region, off_x=0, off_y=0, off_z=0) -> list[dict]:
             bits = max(2, (palette_size - 1).bit_length())
             values_per_long = 64 // bits
             total_values = len(block_states) * values_per_long
-            
-            # Küp olarak tahmin et
+
             import math
             side = int(math.ceil(total_values ** (1/3)))
             width = height = length = side
@@ -447,17 +463,16 @@ def _read_litematica_region(region, off_x=0, off_y=0, off_z=0) -> list[dict]:
     if width == 0 or height == 0 or length == 0:
         raise ValueError(f"Geçersiz boyutlar: {width}x{height}x{length}")
 
-    # Palette — BlockStatePalette listesi
+    print(f"[READER] Litematica bölge boyutlar: {width}x{height}x{length}")
+
     palette_list = region.get("BlockStatePalette")
     if palette_list is None:
         raise ValueError("BlockStatePalette bulunamadı")
 
-    # Palette'i {index: "minecraft:block_name"} formatına çevir
     palette = {}
     for i, entry in enumerate(palette_list):
         if hasattr(entry, 'get'):
             name = str(entry.get("Name", "minecraft:air"))
-            # Properties varsa ekle
             props = entry.get("Properties")
             if props:
                 prop_str = ",".join(f"{k}={v}" for k, v in props.items())
@@ -466,16 +481,13 @@ def _read_litematica_region(region, off_x=0, off_y=0, off_z=0) -> list[dict]:
             name = str(entry)
         palette[i] = name
 
-    # BlockStates — packed long array
     block_states = region.get("BlockStates")
     if block_states is None:
         raise ValueError("BlockStates bulunamadı")
 
-    # Kaç bit gerekiyor?
     palette_size = len(palette)
     bits_per_block = max(2, (palette_size - 1).bit_length())
 
-    # Long array'den blok indexlerini çıkar
     total_blocks = width * height * length
     indices = _unpack_longs(list(block_states), bits_per_block, total_blocks)
 
@@ -485,13 +497,12 @@ def _read_litematica_region(region, off_x=0, off_y=0, off_z=0) -> list[dict]:
         block_idx = indices[i]
         name = palette.get(block_idx, "minecraft:air")
 
-        # Air kontrolü - stairs false positive önle
         name_lower = name.lower()
         is_air = any(air in name_lower for air in ["minecraft:air", "cave_air", "void_air"])
         if is_air and "stair" not in name_lower:
             continue
 
-        # Litematica koordinat sırası: Y * (SizeZ * SizeX) + Z * SizeX + X
+        # Litematica koordinat sırası: Y * (length * width) + Z * width + X
         y = i // (length * width)
         z = (i % (length * width)) // width
         x = i % width
@@ -509,14 +520,12 @@ def _read_litematica_region(region, off_x=0, off_y=0, off_z=0) -> list[dict]:
 def _unpack_longs(long_array: list, bits: int, total: int) -> list[int]:
     """
     Minecraft packed long array'den blok indexlerini çıkar.
-    İki farklı packing stratejisini destekler (1.15 öncesi ve sonrası).
     """
     indices = []
     mask = (1 << bits) - 1
     values_per_long = 64 // bits
 
     for long_val in long_array:
-        # Python'da signed long'u unsigned'a çevir
         if hasattr(long_val, '__int__'):
             long_val = int(long_val)
         if long_val < 0:
@@ -533,13 +542,9 @@ def _unpack_longs(long_array: list, bits: int, total: int) -> list[int]:
     return indices
 
 
-# -------------------------------------------------------------------
-# YARDIMCI: Varint decoder
-# -------------------------------------------------------------------
 def _decode_varints(data: bytes) -> list[int]:
     """
     Minecraft varint formatını decode eder.
-    Her sayı 1-5 byte arası, MSB devam bitini gösterir.
     """
     result: list[int] = []
     i = 0
